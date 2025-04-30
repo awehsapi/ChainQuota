@@ -101,3 +101,115 @@
 (define-private (is-valid-user-address (user-address principal))
     (is-standard user-address)
 )
+
+;; Read Only Functions
+(define-read-only (get-user-balance (user-address principal))
+    (default-to u0 (map-get? user-resource-balances user-address))
+)
+
+(define-read-only (get-resource-info (resource-id uint))
+    (map-get? available-resource-types resource-id)
+)
+
+(define-read-only (get-request-details (request-id uint))
+    (map-get? allocation-requests request-id)
+)
+
+(define-read-only (get-user-allocation-history (user-address principal))
+    (default-to (list) (map-get? user-allocation-history user-address))
+)
+
+(define-read-only (get-resource-price-history (resource-id uint))
+    (default-to (list) (map-get? resource-price-history resource-id))
+)
+
+(define-read-only (get-system-status)
+    {
+        initialized: (var-get is-contract-initialized),
+        paused: (var-get is-system-frozen),
+        maintenance: (var-get is-maintenance-active),
+        global-limit: (var-get global-allocation-limit),
+        emergency-contact: (var-get backup-admin-address)
+    }
+)
+
+;; Public Functions
+;; System Management Functions
+(define-public (initialize-system)
+    (begin
+        (asserts! (is-admin) ERROR_UNAUTHORIZED_ACCESS)
+        (asserts! (not (var-get is-contract-initialized)) ERROR_CONTRACT_ALREADY_INITIALIZED)
+        (var-set is-contract-initialized true)
+        (var-set pending-request-counter u0)
+        (var-set is-system-frozen false)
+        (var-set is-maintenance-active false)
+        (ok true)
+    )
+)
+
+(define-public (update-system-parameters (new-global-limit uint) (new-backup-admin principal))
+    (begin
+        (asserts! (is-admin) ERROR_UNAUTHORIZED_ACCESS)
+        (asserts! (> new-global-limit u0) ERROR_INVALID_PARAMETERS)
+        (asserts! (is-valid-user-address new-backup-admin) ERROR_INVALID_PARAMETERS)
+        (var-set global-allocation-limit new-global-limit)
+        (var-set backup-admin-address new-backup-admin)
+        (ok true)
+    )
+)
+
+;; Resource Management Functions
+(define-public (register-resource-type 
+    (resource-id uint) 
+    (resource-name (string-ascii 64)) 
+    (initial-supply uint) 
+    (initial-price uint)
+    (min-allocation uint)
+    (max-allocation uint)
+    (required-priority uint))
+    (begin
+        (asserts! (is-admin) ERROR_UNAUTHORIZED_ACCESS)
+        (asserts! (is-quantity-valid initial-supply) ERROR_INVALID_RESOURCE_QUANTITY)
+        (asserts! (is-quantity-valid initial-price) ERROR_INVALID_RESOURCE_QUANTITY)
+        (asserts! (<= required-priority u5) ERROR_INSUFFICIENT_PRIORITY)
+        (asserts! (>= min-allocation u1) ERROR_INVALID_PARAMETERS)
+        (asserts! (> max-allocation min-allocation) ERROR_INVALID_PARAMETERS)
+        (asserts! (<= max-allocation initial-supply) ERROR_INVALID_PARAMETERS)
+        (asserts! (not (resource-exists resource-id)) ERROR_INVALID_PARAMETERS)
+        (asserts! (>= (len resource-name) u1) ERROR_INVALID_PARAMETERS)
+
+        (map-set available-resource-types resource-id {
+            resource-name: resource-name,
+            total-supply: initial-supply,
+            available-supply: initial-supply,
+            unit-price: initial-price,
+            is-frozen: false,
+            min-access-level: required-priority,
+            min-allocation: min-allocation,
+            max-allocation: max-allocation,
+            freeze-duration: u0,
+            last-price-update: block-height
+        })
+        (ok true)
+    )
+)
+
+(define-public (update-resource-price (resource-id uint) (new-price uint))
+    (let (
+        (resource-info (unwrap! (map-get? available-resource-types resource-id) ERROR_RESOURCE_TYPE_NOT_FOUND))
+    )
+        (asserts! (is-admin) ERROR_UNAUTHORIZED_ACCESS)
+        (asserts! (is-quantity-valid new-price) ERROR_INVALID_RESOURCE_QUANTITY)
+        (asserts! (resource-exists resource-id) ERROR_RESOURCE_TYPE_NOT_FOUND)
+
+        (try! (update-price-history-log resource-id new-price))
+
+        (map-set available-resource-types resource-id 
+            (merge resource-info {
+                unit-price: new-price,
+                last-price-update: block-height
+            })
+        )
+        (ok true)
+    )
+)
